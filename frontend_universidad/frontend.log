@@ -1,0 +1,15 @@
+nohup: ignoring input
+
+> universidad-puropollo@0.1.0 start
+> next start -p 3012
+
+ ⨯ Failed to start server
+Error: listen EADDRINUSE: address already in use :::3012
+    at <unknown> (Error: listen EADDRINUSE: address already in use :::3012)
+    at new Promise (<anonymous>) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '::',
+  port: 3012
+}

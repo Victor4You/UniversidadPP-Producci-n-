@@ -1,0 +1,533 @@
+// src/components/test/CourseTestModal.tsx
+"use client";
+
+import { Fragment, useState, useEffect, useCallback, useRef } from "react";
+import { Dialog, Transition } from "@headlessui/react";
+import axios from "axios";
+import { useAuth } from "@/hooks/useAuth";
+
+// --- ICONOS ---
+const XMarkIcon = () => (
+  <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+  </svg>
+);
+const PlayIcon = () => (
+  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+const DocumentIcon = () => (
+  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+  </svg>
+);
+const ClockIcon = () => (
+  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+
+// --- COMPONENTE POLLITO CON ETIQUETAS ---
+const PollitoRating = ({ starValue, currentRating, onSelect }: { starValue: number, currentRating: number, onSelect: () => void }) => {
+  const labels: Record<number, string> = {
+    1: "MUY MALO",
+    2: "REGULAR",
+    3: "BUENO",
+    4: "EXCELENTE"
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <button
+        type="button"
+        onClick={onSelect}
+        className="transform transition-all duration-200 active:scale-125 hover:scale-110"
+      >
+        <img
+          src={`/assets/images/POLLO-${starValue}.png`}
+          alt={labels[starValue]}
+          className={`w-10 h-10 object-contain ${currentRating >= starValue ? "grayscale-0 brightness-110" : "grayscale opacity-30"}`}
+        />
+      </button>
+      <span className="text-[7px] font-black text-gray-400 uppercase leading-none">{labels[starValue]}</span>
+    </div>
+  );
+};
+
+export default function CourseTestModal({ isOpen, onClose, onSuccess, courseData }: any) {
+  const { user } = useAuth();
+  const [currentStep, setCurrentStep] = useState<"content" | "quiz" | "survey" | "results">("content");
+  const [isSaving, setIsSaving] = useState(false);
+  const [surveyData, setSurveyData] = useState<Record<string, any>>({});
+  const [activeSectionIdx, setActiveSectionIdx] = useState(0);
+  
+  const preguntasEncuesta = courseData?.newEncuestaConfig || courseData?.newencuestaconfig || [];
+
+  const lastTimeReached = useRef(0);
+  const [currentVideo, setCurrentVideo] = useState<any>(null);
+  const [currentPDF, setCurrentPDF] = useState<any>(null);
+  const [attempts, setAttempts] = useState(0);
+  const [shuffledQuestions, setShuffledQuestions] = useState<any[]>([]);
+  const [quizTimeLeft, setQuizTimeLeft] = useState<number>(1800);
+  const [score, setScore] = useState(0);
+  const [userAnswers, setUserAnswers] = useState<Record<string, string>>({});
+  const [pdfScrollReached, setPdfScrollReached] = useState(false);
+  const [viewedVideos, setViewedVideos] = useState<Set<string>>(new Set());
+  const [viewedPdfs, setViewedPdfs] = useState<Set<string>>(new Set());
+  const [approvedSections, setApprovedSections] = useState<Set<number>>(new Set());
+
+  const tieneSecciones = courseData?.secciones && courseData.secciones.length > 0;
+
+  const isSectionLocked = (index: number) => {
+    if (!tieneSecciones || index === 0) return false;
+    return !approvedSections.has(index - 1);
+  };
+
+  const isExamUnlocked = (() => {
+    if (tieneSecciones) {
+      const currentSec = courseData.secciones[activeSectionIdx];
+      const allVideosVistos = currentSec.videos?.every((v: any) => viewedVideos.has(String(v.id))) ?? true;
+      const allPdfsLeidos = currentSec.pdfs?.every((p: any) => viewedPdfs.has(String(p.id))) ?? true;
+      return allVideosVistos && allPdfsLeidos;
+    }
+    const allV = courseData?.videos?.every((v: any) => viewedVideos.has(String(v.id)));
+    const allP = courseData?.pdfs?.every((p: any) => viewedPdfs.has(String(p.id)));
+    return allV && allP;
+  })();
+
+  // Inicialización de datos de encuesta
+
+    useEffect(() => {
+  if (preguntasEncuesta.length > 0) {
+    const initialSurvey: Record<string, any> = {};
+    preguntasEncuesta.forEach((item: any, idx: number) => {
+      const key = (typeof item === 'object') ? (item.id || `q-${idx}`) : String(item);
+
+      // --- MEJORA DE DETECCIÓN ---
+      const optionsList = item.opciones || item.options || [];
+      const rawType = (typeof item === 'object') ? (item.type || item.tipo || '').toLowerCase() : 'pollitos';
+      
+      const isMultiple = rawType.includes('multiple') || rawType.includes('múltiple') || rawType.includes('check') || optionsList.length > 0;
+      const isText = rawType.includes('abierta') || rawType.includes('open') || rawType.includes('text');
+
+      if (isMultiple) {
+        initialSurvey[key] = []; // Inicializa como array para checkboxes
+      } else if (isText) {
+        initialSurvey[key] = "";
+      } else {
+        initialSurvey[key] = 4; // Default pollitos
+      }
+    });
+    initialSurvey["comentarios_generales"] = "";
+    setSurveyData(initialSurvey);
+  }
+}, [isOpen, preguntasEncuesta]);
+
+
+  useEffect(() => {
+    const fetchProgress = async () => {
+      if (isOpen && user?.id && courseData?.id) {
+        try {
+          const { data: enrollData } = await axios.get(`${process.env.NEXT_PUBLIC_API_URL}/courses/enrollment-status`, {
+            params: { userId: Number(user.id), courseId: Number(courseData.id) },
+          });
+
+          if (!enrollData || !enrollData.status) {
+            alert("⚠️ NO ESTÁS INSCRITO.");
+            onClose();
+            return;
+          }
+
+          if (enrollData?.status === 'bloqueado') {
+            alert("🚨 CURSO BLOQUEADO.");
+            onClose();
+            return;
+          }
+
+          const { data } = await axios.get(`${process.env.NEXT_PUBLIC_API_URL}/courses/user-progress`, {
+            params: { userId: Number(user.id), courseId: Number(courseData.id) },
+          });
+          if (data) {
+            setViewedVideos(new Set(data.viewedVideos?.map(String) || []));
+            setViewedPdfs(new Set(data.viewedPdfs?.map(String) || []));
+            setAttempts(data.attempts || 0);
+          }
+        } catch (error) { console.log("Nuevo progreso."); }
+      }
+    };
+    if (isOpen) {
+      fetchProgress();
+      const sourceQuestions = tieneSecciones ? (courseData.secciones[activeSectionIdx]?.questions || []) : (courseData?.questions || []);
+      setShuffledQuestions([...sourceQuestions].sort(() => Math.random() - 0.5));
+      setQuizTimeLeft((courseData?.duracionExamen || 30) * 60);
+      setCurrentStep("content");
+    }
+  }, [isOpen, user?.id, courseData, activeSectionIdx]);
+
+  const syncProgress = async (updatedVideos: Set<string>, updatedPdfs: Set<string>, updatedAttempts: number) => {
+    const userId = user?.id ? Number(user.id) : null;
+    const courseId = courseData?.id ? Number(courseData.id) : null;
+    if (!userId || !courseId) return;
+    try {
+      await axios.post(`${process.env.NEXT_PUBLIC_API_URL}/courses/save-progress`, {
+        userId, courseId, viewedVideos: Array.from(updatedVideos).map(Number),
+        viewedPdfs: Array.from(updatedPdfs).map(Number), attempts: updatedAttempts,
+      });
+    } catch (e: any) { console.error("Error sincronizando:", e.message); }
+  };
+
+  const markPDFAsRead = () => {
+    if (currentPDF && pdfScrollReached) {
+      const newPdfs = new Set(viewedPdfs).add(String(currentPDF.id));
+      setViewedPdfs(newPdfs);
+      syncProgress(viewedVideos, newPdfs, attempts);
+      setCurrentPDF(null);
+      setPdfScrollReached(false);
+    }
+  };
+
+  const handleFinishExam = useCallback(async () => {
+    let correctas = 0;
+    shuffledQuestions.forEach((q: any) => { if (userAnswers[q.id] === q.answer) correctas++; });
+    const finalScore = Math.round((correctas / (shuffledQuestions.length || 1)) * 100);
+    setScore(finalScore);
+
+    if (finalScore >= 90) {
+      if (tieneSecciones) {
+        setApprovedSections(prev => new Set(prev).add(activeSectionIdx));
+        if (activeSectionIdx < courseData.secciones.length - 1) {
+          alert("¡Sección aprobada! Avanzando.");
+          setActiveSectionIdx(prev => prev + 1);
+          setCurrentStep("content");
+          setUserAnswers({});
+        } else {
+          setCurrentStep("survey");
+        }
+      } else {
+        setCurrentStep("survey");
+      }
+    } else {
+      const nextAttempt = attempts + 1;
+      setAttempts(nextAttempt);
+      if (nextAttempt >= 2) {
+        await axios.post(`${process.env.NEXT_PUBLIC_API_URL}/courses/register-completion`, {
+          courseId: Number(courseData.id), userId: Number(user?.id), score: finalScore,
+        });
+        alert("Has fallado el segundo intento. El curso ha sido bloqueado.");
+        onClose();
+      } else {
+        await syncProgress(viewedVideos, viewedPdfs, nextAttempt);
+        setCurrentStep("results");
+      }
+    }
+  }, [shuffledQuestions, userAnswers, attempts, viewedVideos, viewedPdfs, activeSectionIdx, tieneSecciones, courseData, user?.id]);
+
+  const handleSaveToPostgres = async () => {
+    setIsSaving(true);
+    try {
+      await axios.post(`${process.env.NEXT_PUBLIC_API_URL}/courses/register-completion`, {
+        courseId: Number(courseData.id),
+        userId: Number(user?.id),
+        score: score,
+        survey: surveyData,
+        newEncuestaConfig: preguntasEncuesta,
+      });
+      if (score === 100) handleDownloadDiploma();
+      setTimeout(() => {
+        setCurrentStep("results");
+        setIsSaving(false);
+        if (onSuccess) onSuccess(score);
+      }, 800);
+    } catch (error: any) {
+      setIsSaving(false);
+      alert("Error al guardar.");
+    }
+  };
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (currentStep === "quiz" && quizTimeLeft > 0) {
+      timer = setInterval(() => {
+        setQuizTimeLeft((prev) => prev <= 1 ? (handleFinishExam(), 0) : prev - 1);
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [currentStep, quizTimeLeft, handleFinishExam]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  const handleDownloadDiploma = () => {
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL;
+    const url = `${baseUrl}/courses/diploma/${user?.id}/${courseData?.id}`;
+    window.open(url, '_blank');
+  };
+
+  const getFileUrl = (path: string) => {
+    if (!path) return "";
+    if (path.startsWith('http')) return path;
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+    return `${apiBase.replace(/\/v1$/, '')}${path}`;
+  };
+
+  return (
+    <Transition appear show={isOpen} as={Fragment}>
+      <Dialog as="div" className="relative z-50" onClose={onClose}>
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" />
+        <div className="fixed inset-0 overflow-hidden">
+          <div className="flex min-h-full items-center justify-center p-4">
+            <Dialog.Panel className="w-full max-w-6xl max-h-[90vh] transform overflow-hidden rounded-2xl bg-white p-8 shadow-xl transition-all flex flex-col">
+              
+              {/* HEADER */}
+              <div className="flex justify-between items-center mb-6 border-b pb-4">
+                <Dialog.Title className="text-2xl font-black text-gray-900 uppercase tracking-tighter">
+                  {courseData?.nombre}
+                </Dialog.Title>
+                <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full"><XMarkIcon /></button>
+              </div>
+
+              {/* TABS NAVIGATION */}
+              <div className="flex space-x-4 mb-8">
+                <button onClick={() => setCurrentStep("content")} className={`px-6 py-2 rounded-xl font-black text-xs uppercase tracking-widest ${currentStep === "content" ? "bg-black text-white" : "bg-gray-100 text-gray-400"}`}>CONTENIDO</button>
+                <button
+                  disabled={!isExamUnlocked || score >= 90}
+                  onClick={() => setCurrentStep("quiz")}
+                  className={`px-6 py-2 rounded-xl font-black text-xs uppercase tracking-widest ${currentStep === "quiz" ? "bg-green-600 text-white" : isExamUnlocked ? "bg-gray-100 text-black" : "bg-gray-50 text-gray-300"}`}
+                >
+                  CUESTIONARIO {!isExamUnlocked ? "🔒" : score >= 90 ? "⭐" : "✅"}
+                </button>
+              </div>
+
+              {/* MAIN CONTENT AREA */}
+              <div className="flex-1 overflow-y-auto pr-4 custom-scrollbar">
+                
+                {/* --- STEP: CONTENT --- */}
+                {currentStep === "content" && (
+                  <div className="space-y-8">
+                    {tieneSecciones ? (
+                      courseData.secciones.map((seccion: any, sIdx: number) => {
+                        const locked = isSectionLocked(sIdx);
+                        const isCurrent = activeSectionIdx === sIdx;
+                        return (
+                          <div key={sIdx} className={`bg-white border-2 rounded-[2rem] p-6 ${locked ? "opacity-50 grayscale bg-gray-50 border-gray-100" : isCurrent ? "border-blue-600 shadow-sm" : "border-gray-100"}`}>
+                            <h3 className="text-sm font-black text-blue-600 uppercase mb-6 flex items-center gap-3">
+                              <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${locked ? "bg-gray-400" : "bg-blue-600 text-white"}`}>{locked ? "🔒" : sIdx + 1}</span>
+                              {seccion.titulo}
+                            </h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {seccion.videos?.map((video: any) => (
+                                <button key={video.id} disabled={locked} onClick={() => { setCurrentVideo(video); lastTimeReached.current = 0; }} className={`flex items-center gap-4 p-4 rounded-2xl border-2 ${viewedVideos.has(String(video.id)) ? "bg-green-50 border-green-200" : "bg-gray-50 border-transparent hover:border-blue-200"}`}>
+                                  <div className={`p-2 rounded-lg ${viewedVideos.has(String(video.id)) ? "bg-green-100 text-green-600" : "bg-blue-100 text-blue-600"}`}><PlayIcon /></div>
+                                  <span className="font-bold text-sm truncate">{video.title}</span>
+                                </button>
+                              ))}
+                              {seccion.pdfs?.map((pdf: any) => (
+                                <button key={pdf.id} disabled={locked} onClick={() => { setCurrentPDF(pdf); setPdfScrollReached(false); }} className={`flex items-center gap-4 p-4 rounded-2xl border-2 ${viewedPdfs.has(String(pdf.id)) ? "bg-green-50 border-green-200" : "bg-gray-50 border-transparent hover:border-orange-200"}`}>
+                                  <div className={`p-2 rounded-lg ${viewedPdfs.has(String(pdf.id)) ? "bg-green-100 text-green-600" : "bg-orange-100 text-orange-600"}`}><DocumentIcon /></div>
+                                  <span className="font-bold text-sm truncate">{pdf.title}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="bg-white border-2 border-gray-100 rounded-[2rem] p-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {courseData?.videos?.map((video: any) => (
+                            <button key={video.id} onClick={() => { setCurrentVideo(video); lastTimeReached.current = 0; }} className={`flex items-center gap-4 p-4 rounded-2xl border-2 ${viewedVideos.has(String(video.id)) ? "bg-green-50 border-green-200" : "bg-gray-50 border-transparent hover:border-blue-200"}`}>
+                              <div className="p-2 rounded-lg bg-blue-100 text-blue-600"><PlayIcon /></div>
+                              <span className="font-bold text-sm truncate">{video.title}</span>
+                            </button>
+                          ))}
+                          {courseData?.pdfs?.map((pdf: any) => (
+                            <button key={pdf.id} onClick={() => { setCurrentPDF(pdf); setPdfScrollReached(false); }} className={`flex items-center gap-4 p-4 rounded-2xl border-2 ${viewedPdfs.has(String(pdf.id)) ? "bg-green-50 border-green-200" : "bg-gray-50 border-transparent hover:border-orange-200"}`}>
+                              <div className="p-2 rounded-lg bg-orange-100 text-orange-600"><DocumentIcon /></div>
+                              <span className="font-bold text-sm truncate">{pdf.title}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* --- STEP: QUIZ --- */}
+                {currentStep === "quiz" && (
+                  <div className="space-y-8 pb-6">
+                    <div className="flex justify-between items-center p-6 bg-black text-white rounded-3xl sticky top-0 shadow-lg z-10">
+                      <div className="flex flex-col"><span className="text-[10px] font-black text-gray-400 uppercase">Intento</span><span className="text-xl font-black">{attempts + 1} / 2</span></div>
+                      <div className="flex items-center gap-3"><ClockIcon /><span className="text-2xl font-black">{formatTime(quizTimeLeft)}</span></div>
+                      <div className="text-right"><span className="text-[10px] font-black text-gray-400 uppercase">Sección</span><span className="text-xl font-black text-green-500 block">{tieneSecciones ? activeSectionIdx + 1 : 'Única'}</span></div>
+                    </div>
+                    {shuffledQuestions.map((q: any, i: number) => (
+                      <div key={q.id} className="p-8 border-2 border-gray-100 rounded-[2rem] bg-gray-50 space-y-6">
+                        <p className="text-xl font-black text-gray-800">{i + 1}. {q.question}</p>
+                        <div className="grid grid-cols-1 gap-4">
+                          {q.options?.map((opt: string, idx: number) => (
+                            <label key={idx} className={`flex items-center gap-4 p-5 border-2 rounded-2xl cursor-pointer transition-all ${userAnswers[q.id] === opt ? "bg-blue-600 border-blue-600 text-white" : "bg-white border-transparent hover:border-gray-200"}`}>
+                              <input type="radio" className="hidden" checked={userAnswers[q.id] === opt} onChange={() => setUserAnswers((prev) => ({ ...prev, [q.id]: opt }))} />
+                              <span className="font-bold">{opt}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                    <button onClick={handleFinishExam} className="w-full py-6 bg-green-600 text-white rounded-[2rem] font-black text-xl hover:bg-green-700 transition-colors uppercase tracking-widest shadow-xl">ENVIAR PARA CALIFICACIÓN</button>
+                  </div>
+                )}
+
+                {/* --- STEP: SURVEY (ENCUESTA) --- */}
+              {currentStep === "survey" && (
+                  <div className="space-y-6 py-6 max-w-2xl mx-auto">
+                    <div className="text-center mb-10">
+                      <h3 className="font-black uppercase text-3xl text-black tracking-tighter">Finalizar Evaluación</h3>
+                      <p className="text-gray-400 text-[10px] font-black uppercase tracking-widest mt-2">Tu opinión nos ayuda a mejorar</p>
+                    </div>
+
+                    <div className="space-y-6">
+                      {preguntasEncuesta.map((item: any, idx: number) => {
+                        const qText = (typeof item === 'object')
+                          ? (item.pregunta || item.question || item.texto || item.label || `Pregunta ${idx + 1}`)
+                          : String(item);
+
+                        const qKey = (typeof item === 'object') ? (item.id || `q-${idx}`) : String(item);
+
+                        const optionsList = item.opciones || item.options || [];
+                        const qRawType = (typeof item === 'object') ? (item.type || item.tipo || '').toLowerCase() : 'pollitos';
+
+                        const isMultipleChoice = qRawType.includes('multiple') || qRawType.includes('múltiple') || qRawType.includes('check') || optionsList.length > 0;
+                        const isTextQuestion = qRawType.includes('abierta') || qRawType.includes('open') || qRawType.includes('text');
+                        const isPollito = !isMultipleChoice && !isTextQuestion;
+
+                        return (
+                          <div key={qKey} className="p-6 bg-gray-50 rounded-[2rem] border-2 border-transparent hover:border-black/5 transition-all">
+                            <p className="font-black uppercase text-[11px] text-gray-800 mb-4 tracking-tight leading-relaxed">{qText}</p>
+
+                            {isPollito && (
+                              <div className="flex justify-around items-end pt-2">
+                                {[1, 2, 3, 4].map((v) => (
+                                  <PollitoRating
+                                    key={v}
+                                    starValue={v}
+                                    currentRating={surveyData[qKey] || 0}
+                                    onSelect={() => setSurveyData({ ...surveyData, [qKey]: v })}
+                                  />
+                                ))}
+                              </div>
+                            )}
+
+                            {isMultipleChoice && (
+                              <div className="grid grid-cols-1 gap-3">
+                                {optionsList.length > 0 ? (
+                                  optionsList.map((opt: string, oIdx: number) => (
+                                    <label key={oIdx} className="flex items-center gap-4 p-4 bg-white rounded-2xl border-2 border-gray-100 cursor-pointer hover:border-blue-600 transition-all shadow-sm">
+                                      <input
+                                        type="checkbox"
+                                        className="w-6 h-6 rounded-lg border-2 border-gray-300 text-blue-600"
+                                        checked={Array.isArray(surveyData[qKey]) && surveyData[qKey].includes(opt)}
+                                        onChange={(e) => {
+                                          const current = Array.isArray(surveyData[qKey]) ? surveyData[qKey] : [];
+                                          const next = e.target.checked
+                                            ? [...current, opt]
+                                            : current.filter((x: string) => x !== opt);
+                                          setSurveyData({ ...surveyData, [qKey]: next });
+                                        }}
+                                      />
+                                      <span className="text-sm font-bold text-gray-700">{opt}</span>
+                                    </label>
+                                  ))
+                                ) : (
+                                  <p className="text-[10px] text-gray-400 italic">No hay opciones definidas.</p>
+                                )}
+                              </div>
+                            )}
+
+                            {isTextQuestion && (
+                              <textarea
+                                className="w-full p-5 rounded-2xl border-2 border-gray-200 bg-white text-sm font-bold"
+                                rows={4}
+                                placeholder="Escribe tu respuesta..."
+                                value={surveyData[qKey] || ""}
+                                onChange={(e) => setSurveyData({ ...surveyData, [qKey]: e.target.value })}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      onClick={handleSaveToPostgres}
+                      disabled={isSaving}
+                      className="w-full mt-8 py-6 bg-black text-white rounded-[2rem] font-black text-xl hover:bg-gray-900 transition-all uppercase tracking-widest shadow-xl disabled:opacity-50"
+                    >
+                      {isSaving ? "GUARDANDO..." : "FINALIZAR Y ENVIAR"}
+                    </button>
+                  </div>
+                )}
+
+
+                {/* --- STEP: RESULTS --- */}
+                {currentStep === "results" && (
+                  <div className="text-center py-10 space-y-8">
+                    <div className={`text-[8rem] font-black leading-none ${score >= 90 ? "text-green-600" : "text-red-600"}`}>{score}%</div>
+                    <p className="text-2xl font-black uppercase">{score >= 90 ? "¡Aprobado!" : "Aprobación Fallida"}</p>
+                    <div className="flex gap-4 justify-center">
+                      {score >= 90 && (
+                        <button onClick={handleDownloadDiploma} className="px-10 py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg hover:bg-blue-700 flex items-center gap-2">
+                          <DocumentIcon /> DESCARGAR DIPLOMA
+                        </button>
+                      )}
+                      <button onClick={onClose} className="px-10 py-4 bg-gray-100 text-gray-400 rounded-2xl font-black uppercase text-xs tracking-widest">CERRAR</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* VIDEO PLAYER OVERLAY */}
+              {currentVideo && (
+                <div className="fixed inset-0 bg-black/95 z-[70] flex items-center justify-center p-8">
+                  <div className="w-full max-w-5xl aspect-video relative">
+                    <button onClick={() => setCurrentVideo(null)} className="absolute -top-12 right-0 text-white flex items-center gap-2 font-black text-xs uppercase">CERRAR VIDEO <XMarkIcon /></button>
+                    <video
+                      controls autoPlay className="w-full h-full rounded-3xl"
+                      onTimeUpdate={(e: any) => { if (e.target.currentTime > lastTimeReached.current + 1.5) e.target.currentTime = lastTimeReached.current; else lastTimeReached.current = e.target.currentTime; }}
+                      onEnded={() => { const updatedV = new Set(viewedVideos).add(String(currentVideo.id)); setViewedVideos(updatedV); syncProgress(updatedV, viewedPdfs, attempts); setCurrentVideo(null); }}
+                    >
+                      <source src={getFileUrl(currentVideo.fileUrl)} type="video/mp4" />
+                    </video>
+                  </div>
+                </div>
+              )}
+
+              {/* PDF VIEWER OVERLAY */}
+              {currentPDF && (
+                <div className="fixed inset-0 bg-black/95 z-[80] flex items-center justify-center p-6">
+                  <div className="w-full max-w-6xl h-full flex flex-col">
+                    <div className="flex justify-between items-center mb-3 text-white"><h3 className="font-black text-xs uppercase">{currentPDF.title}</h3><button onClick={() => setCurrentPDF(null)} className="text-xs font-black uppercase hover:text-red-500">CERRAR LECTURA</button></div>
+                    <div className="flex-1 bg-white rounded-xl overflow-hidden relative shadow-2xl">
+                      <iframe src={`${getFileUrl(currentPDF.fileUrl)}#toolbar=0&navpanes=0`} className="w-full h-full border-none" />
+                      <div onMouseEnter={() => setPdfScrollReached(true)} className="absolute bottom-0 left-0 w-full h-20 bg-gradient-to-t from-black/20 to-transparent pointer-events-auto" />
+                    </div>
+                    <div className="mt-4 flex flex-col items-center gap-2">
+                      <button disabled={!pdfScrollReached} onClick={markPDFAsRead} className={`w-full py-4 rounded-2xl font-black uppercase transition-all duration-300 ${pdfScrollReached ? "bg-green-600 text-white shadow-lg scale-[1.02]" : "bg-gray-800 text-gray-500 cursor-not-allowed border border-white/5"}`}>
+                        {pdfScrollReached ? "CONFIRMAR LECTURA COMPLETADA" : "LECTURA EN PROGRESO..."}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+            </Dialog.Panel>
+          </div>
+        </div>
+      </Dialog>
+    </Transition>
+  );
+}
